@@ -107,7 +107,7 @@ ae_api_lacd <- left_join(ae_api %>% mutate(postcode = str_replace_all(postcode, 
 
 # index multiple deprivation lookup http://geoportal.statistics.gov.uk/datasets/index-of-multiple-deprivation-december-2015-lookup-in-england
 imd <- read_csv("https://opendata.arcgis.com/datasets/da3b33dd44d94f48a9628a3391957505_0.csv") %>% 
-  setNames(., c("lsoa_code", "lsoa_nm", "imd15", "id"))
+  setNames(., c("lsoa_code", "lsoa_nm", "imd15", "id")) %>% 
   select(-id)
 
 merged_imd <- inner_join(ae_api_lacd, imd, by = "lsoa_code")
@@ -310,6 +310,7 @@ select(merged_imd, imd_dec, org_code, type, attendances, period, breaches) %>%
         plot.title = element_text(margin = margin(t = 1, b = 2, unit = "cm"), size = 16))
 
 ggsave(filename = "./breach_type_imd.png", width = 17, height = 11, dpi = "retina")
+
 
 # TODO: attendances by IMD ------------------------------------------------------
 
