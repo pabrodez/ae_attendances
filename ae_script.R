@@ -141,7 +141,7 @@ theme_session <-
     plot.caption = element_text(margin = margin(t = 2, unit = "cm"))
     )
 
-theme_set(theme_session)
+# theme_set(theme_session)
 
 # cumsum and map ----------------------------------------------------------
 
@@ -311,6 +311,61 @@ select(merged_imd, imd_dec, org_code, type, attendances, period, breaches) %>%
 
 ggsave(filename = "./breach_type_imd.png", width = 17, height = 11, dpi = "retina")
 
+# ribbon of attendances and breaches of type 1 A&E --------------------------------------
+
+ribbon_df <- 
+  merged_imd %>%
+  select(type, org_code, attendances, breaches, period) %>% 
+  filter(type == "1", period < "2018-04-01") %>% 
+  group_by(org_code, type) %>% 
+  summarise(attendances = sum(attendances),
+            breaches = sum(breaches))
+
+ribbon1 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = seq(0, max(ribbon_df$attendances)) * .75)
+
+ribbon2 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = seq(0, max(ribbon_df$attendances)) * .5)
+
+ribbon3 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = seq(0, max(ribbon_df$attendances)) * .25)
+
+ribbon4 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = 0)
+
+ribbon_df %>%
+  ggplot(aes(y = breaches, x = attendances)) +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon4, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#c0d8c1") +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon3, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#d8d8ab") +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon2, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#efcf97") +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon1, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#efb7b3") +
+  geom_point(alpha = .8) +
+  # annotate("text", x = 22000, y = 18000, fontface = "bold", hjust = 0, label = "75% - 100%", alpha = .6) +
+  # annotate("text", x = 22000, y = 14000, fontface = "bold", hjust = 0, label = "50% - 75%", alpha = .6) +
+  # annotate("text", x = 22000, y = 8000, fontface = "bold", hjust = 0, label = "25% - 50%", alpha = .6) +
+  # annotate("text", x = 23000, y = 2000, fontface = "bold", hjust = 0, label = "0% - 25%", alpha = .6) +
+  scale_y_continuous(position = "right", labels = number_format()) +
+  expand_limits(x = c(0, 0)) +
+  coord_cartesian(ylim=c(0, max(ribbon_df$attendances) * .75)) +
+  labs(x       = "Attendances", 
+       y       = "Breaches",
+       caption = "Source: NHS England | Graphic: @pabrodez",
+       title = str_to_title("Attendances and breaches of Type 1 A&E departments in England"),
+       subtitle = str_wrap(paste("From 2016-04-01 to 2018-04-01"))
+  ) +
+  theme_session +
+  theme(axis.title = element_text(color = "white"),
+        legend.direction = "horizontal",
+        legend.key.height = unit(3, "mm"),
+        legend.spacing.x = unit(0, "mm"),
+        legend.position = c(x = .2, y = .7),
+        panel.grid.major = element_blank())
+
+ggsave(filename = "./ribbon_att_breach.png", width = 17, height = 11, dpi = "retina")
 
 # TODO: attendances by IMD ------------------------------------------------------
 
