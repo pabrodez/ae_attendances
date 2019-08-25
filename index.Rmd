@@ -19,7 +19,17 @@ knitr::opts_chunk$set(
 )
 ```
 
-```{r libraries, include=FALSE}
+***
+
+> This is an overview of the dataset tidied and uploaded by the [NHS R community](https://github.com/nhs-r-community), which is sourced from [NHS England A&E Attendances and Emergency Admissions data](https://www.england.nhs.uk/statistics/statistical-work-areas/ae-waiting-times-and-activity/). Refer to the previous links for a more detailed [description](https://www.england.nhs.uk/statistics/wp-content/uploads/sites/2/2019/07/AE-Attendances-Emergency-Definitions-v4.0-final-July-2019.pdf)
+
+***
+
+# Get data and tweak
+
+Let's load the lirbaries first:
+
+```{r libraries, echo=TRUE}
 library(tidyverse)
 library(tidyr)  ## 0.8.99.9
 library(httr)
@@ -31,13 +41,6 @@ library(knitr)
 library(scales)
 ```
 
-***
-
-> This is an overview of the dataset tidied and uploaded by the [NHS R community](https://github.com/nhs-r-community), which is sourced from [NHS England A&E Attendances and Emergency Admissions data](https://www.england.nhs.uk/statistics/statistical-work-areas/ae-waiting-times-and-activity/). Refer to the previous links for a more detailed [description](https://www.england.nhs.uk/statistics/wp-content/uploads/sites/2/2019/07/AE-Attendances-Emergency-Definitions-v4.0-final-July-2019.pdf)
-
-***
-
-# Get data and tweak
 We can either download the package and load the data by calling `remotes::install_github("https://github.com/nhs-r-community/NHSRdatasets")` then `data(ae_attendances)` or simply:
 ```{r load}
 load(url("https://github.com/nhs-r-community/NHSRdatasets/blob/master/data/ae_attendances.RData?raw=true"))
@@ -412,4 +415,11 @@ ribbon_df %>%
         panel.grid.major = element_blank())
 ```
 
+
+
+# Sesssion info
+
+```{r session_info}
+sessionInfo()
+```
 
