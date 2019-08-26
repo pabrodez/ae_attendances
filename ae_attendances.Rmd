@@ -1,0 +1,425 @@
+---
+title: "NHS England A&E attendances and admissions"
+author: "Pablo M. Rodriguez"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: united
+    css: style.css
+    toc: true
+    toc_float: true
+    highlight: tango
+    df_print: paged
+    code_folding: "hide" 
+---
+
+```{r chunk_setup, include=FALSE}
+knitr::opts_chunk$set(
+  cache=TRUE, echo=TRUE, message=FALSE, tidy=FALSE, warning=FALSE, error=FALSE, dpi=300, out.width = "100%", out.height = "100%"
+)
+```
+
+***
+
+> This is an overview of the dataset tidied and uploaded by the [NHS R community](https://github.com/nhs-r-community), which is sourced from [NHS England A&E Attendances and Emergency Admissions data](https://www.england.nhs.uk/statistics/statistical-work-areas/ae-waiting-times-and-activity/). Refer to the previous links for a more detailed [description](https://www.england.nhs.uk/statistics/wp-content/uploads/sites/2/2019/07/AE-Attendances-Emergency-Definitions-v4.0-final-July-2019.pdf)
+
+***
+
+# Get data and tweak
+
+Let's load the lirbaries first:
+
+```{r libraries, echo=TRUE}
+library(tidyverse)
+library(tidyr)  ## 0.8.99.9
+library(httr)
+library(jsonlite)
+library(sf)
+library(rcartocolor)
+library(ggthemes)
+library(knitr)
+library(scales)
+```
+
+We can either download the package and load the data by calling `remotes::install_github("https://github.com/nhs-r-community/NHSRdatasets")` then `data(ae_attendances)` or simply:
+```{r load}
+load(url("https://github.com/nhs-r-community/NHSRdatasets/blob/master/data/ae_attendances.RData?raw=true"))
+```
+
+Let's take a look at the columns:
+```{r col_types}
+tibble(column = colnames(ae_attendances), type = sapply(ae_attendances, class), n_unique = sapply(ae_attendances, n_distinct))
+```
+
+It can be useful to check missing values in `attendances`, `breaches` or `admissions` from `r min(ae_attendances$period)` to `r max(ae_attendances$period)`:
+
+```{r missing, out.width="100%"}
+plotNa <- function(dataFrame) {
+        tempDf <- as.data.frame(ifelse(is.na(dataFrame), 0, 1))
+        tempData <- expand.grid(list(x = 1:nrow(tempDf), y = colnames(tempDf)))
+        tempData$v <- as.vector(as.matrix(tempDf))
+        tempData <- data.frame(x = unlist(tempData$x), y = unlist(tempData$y), v = unlist(tempData$v))
+        ggplot(tempData) + geom_tile(aes(x=x, y=y, fill=factor(v))) +
+                scale_fill_manual(values=c("white", "black"), name="Missing value\n1=No, 0=Yes") +
+                theme_light() + ylab("") + xlab("Rows of data set") + ggtitle("")
+        
+}
+arrange(ae_attendances, period) %>% 
+  pivot_longer(cols = c("attendances", "breaches", "admissions"), names_to = "event") %>% 
+  pivot_wider(names_from = "period", values_from = "value") %>% 
+  plotNa()
+```
+
+There's a big chunk of rows with missing data. Maybe, not all departments or organisaitons started reporting at the same time. But there seems to be more completness from the start of the 2018 financial year. 
+
+<br>
+
+There are `r dplyr::n_distinct(ae_attendances$org_code)` distinct organisation codes in this dataset. This is the Organisation Data Service code, that is an identifier for health providers and other non-NHS organisations issued by [NHS Digital](https://digital.nhs.uk/services/organisation-data-service/services-provided-by-the-organisation-data-service).
+
+<br>
+
+We can add a bit of extra information to the data set by searching the ODS code in the [Organisation Endpoint](https://digital.nhs.uk/services/organisation-data-service/guidance-for-developers/organisation-endpoint), that allows to query for a specified code and obtain organisational data. A JSON file is returned with the full organisational data. This endpoint is part of the [ODS API Suite](https://directory.spineservices.nhs.uk/ODSAPISuite).
+
+```{r get_ods}
+ods_codes <- unique(ae_attendances$org_code)
+
+path <- "https://directory.spineservices.nhs.uk/ORD/2-0-0/organisations/"
+
+list_api_req <- list()
+
+for (i in seq_along(ods_codes)) {
+  
+request <- GET(url = paste0(path, ods_codes[i]))
+response <- content(request, as = "text", encoding = "UTF-8")
+df_org <- fromJSON(response, flatten = TRUE)
+df_org <- enframe(unlist(df_org)) 
+df_org <- df_org[grep("PostCode|Town|(Organisation\\.OrgId\\.extension)|(Organisation\\.Name)", df_org$name), ]
+df_org$name <- c("name", "org_code", "town", "postcode")
+list_api_req[[i]] <- df_org
+
+}
+
+tidy_ods <- bind_rows(list_api_req) %>% 
+  mutate(ind = rep(1:(nrow(.)/4), each = 4)) %>%
+  pivot_wider(names_from = "name", values_from = "value") %>% 
+  select(-ind)
+
+ae_ods <- left_join(ae_attendances, tidy_ods, by = c("org_code"))
+ae_ods <- modify_if(ae_ods, is.character, ~ tolower(.))
+```
+
+Here, I use the GET method to query the organisation data by pasting the code with the url, retrieve the content (in JSON format), convert to a list object from JSON, transform to a data frame in long format and get only the fields of post code, town and organisation name. Next, we append all data frames and left join with the data set.
+
+```{r ae_ods_head, echo=FALSE}
+head(ae_ods)
+```
+
+Now let's add another extra bit: the index of deprivation of the LSOA the organisation belongs to. 
+<br>
+First, we link the post code to the LSOA code by using the [National Statistics Postcode Lookup UK dataset API](https://dev.socrata.com/foundry/opendata.camden.gov.uk/tr8t-gqz7) by doing something similar to before:
+
+```{r get_lsoa}
+ae_ods$postcode <- toupper(ae_ods$postcode)
+
+ae_pcodes <- unique(ae_ods$postcode)
+
+path_lu <- "https://opendata.camden.gov.uk/resource/tr8t-gqz7.json?postcode_3="
+
+list_lu_req <- list()
+
+for (i in seq_along(ae_pcodes)) {
+
+  request <- GET(url = paste0(path_lu, sub(" ", "%20", ae_pcodes[i])))
+  response <- content(request, as = "text", encoding = "UTF-8")
+  df_org <- fromJSON(response, flatten = TRUE)
+  df_org <- enframe(unlist(df_org))
+  df_org <- df_org[grep("(postcode_1)|(local_authority_code)|(lsoa_code)", df_org$name), ]
+
+  if (nrow(df_org) != 0) {
+
+  df_org$name <- c("postcode", "lad18cd", "lsoa_code")
+  list_lu_req[[i]] <- df_org
+
+  }
+
+  else {
+    next
+  }
+
+}
+
+tidy_pc <- bind_rows(list_lu_req) %>%
+  mutate(ind = rep(1:(nrow(.)/3), each = 3)) %>%
+  pivot_wider(names_from = "name", values_from = "value") %>%  # two missing post codes
+  select(-ind) %>% 
+  mutate(postcode = str_replace_all(postcode, " ", ""))
+
+ae_api_lsoa <- left_join(ae_ods %>% mutate(postcode = str_replace_all(postcode, " ", "")),
+                    tidy_pc, 
+                    by = "postcode")
+```
+
+And second, we get the [index multiple deprivation lookup](http://geoportal.statistics.gov.uk/datasets/index-of-multiple-deprivation-december-2015-lookup-in-england) and join:
+
+```{r imd_look}
+imd <- read_csv("https://opendata.arcgis.com/datasets/da3b33dd44d94f48a9628a3391957505_0.csv") %>% 
+  setNames(., c("lsoa_code", "lsoa_nm", "imd15", "id")) %>% 
+  select(-id)
+
+merged_imd <- inner_join(ae_api_lsoa, imd, by = "lsoa_code")
+```
+
+The Indeces of Deprivation ranks every LSOA from in England from 1 (most deprived) to 32844 (least deprived). And because, there is not a definite cutoff that discerns between deprived and no deprived, we can use deciles to get 10 equal groups as recommended in the [English Indices of Deprivation 2015 FAQs](https://assets.publishing.service.gov.uk/government/uploads/system/uploads/attachment_data/file/579151/English_Indices_of_Deprivation_2015_-_Frequently_Asked_Questions_Dec_2016.pdf):
+
+```{r imd_deciles}
+imd_quntiles <- c(1, quantile(1:32844, probs = seq(.1, 1, by = .1)))
+  
+merged_imd$imd_dec <- cut(as.numeric(merged_imd$imd15), 
+                          breaks = imd_quntiles, 
+                          include.lowest = T,
+                          labels = c("1-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"))
+```
+
+Also, because we will aggregate at local auhtority level, we need to get the boundaries (GeoJSON format in this case) that will be used later:
+
+```{r get_boundaries, results="hide"}
+sf_gb <- st_read("https://opendata.arcgis.com/datasets/604fc1fbe022460eaac4758c7521c3e7_0.geojson", stringsAsFactors = FALSE)
+sf_gb <- modify_if(sf_gb, is.character, ~ tolower(.))
+```
+
+<br>
+
+***
+
+<br>
+
+# Plot data
+
+## Cummulative attendances
+
+Let's take a look at the accumulated number of attendances:
+
+```{r cumsum_att}
+top_5_att <- 
+  merged_imd %>% 
+  select(name, attendances) %>% 
+  group_by(name) %>% 
+  summarise(sum_att = sum(attendances, na.rm = TRUE)) %>% 
+  top_n(5) %>% 
+  pull(name)
+
+merged_imd %>% 
+  select(org_code, attendances, period) %>% 
+  group_by(org_code, period) %>% 
+  summarise(att = sum(attendances, na.rm = TRUE)) %>% 
+  arrange(period) %>% 
+  mutate(csum_att = cumsum(att)) %>% 
+  left_join(., select(merged_imd, org_code, name)) %>% 
+  distinct() %>% 
+  mutate(
+    color = case_when(
+      name == top_5_att[1] ~ "#b58900",
+      name == top_5_att[2] ~ "#cb4b16",
+      name == top_5_att[3] ~ "#dc322f",
+      name == top_5_att[4] ~ "#6c71c4",
+      name == top_5_att[5] ~ "#2aa198",
+      TRUE ~ "grey35"
+    ),
+    alpha = if_else(name %in% top_5_att, 1, 0.2)) %>% 
+  ggplot(aes(x = period, y = csum_att, group = org_code)) +
+  geom_step(aes(color = color, alpha = alpha)) +
+  scale_color_identity(guide = FALSE) +
+  geom_text(data = . %>% filter(name %in% top_5_att, period == last(period)) %>% 
+              ungroup() %>% 
+              arrange(-csum_att) %>% 
+              mutate(position = c(1020000, 990000, 960000, 930000, 900000)),
+            x = as.Date("2016-04-01"), 
+            aes(y = position, label = glue::glue("{str_to_title(name)}: {scales::comma(csum_att)}"), color = color),
+            family = "Ubuntu Mono",
+            hjust = 0) +
+  scale_alpha_identity() +
+  scale_x_date(date_labels = "%y-%b", 
+               breaks = seq.Date(as.Date("2016-04-01"), as.Date("2019-03-01"), "month"), 
+               limits = c(as.Date("2016-04-01"), as.Date("2019-03-01")),
+               expand = c(0, 0)) +
+  scale_y_continuous(labels = function(x) str_replace(number(x), "\\s0{3}$", "K"), 
+                     expand = c(0, 0),
+                     limits = c(0, NA)) +
+  labs(x = NULL, y = NULL) +
+  theme_clean()+
+  theme(text = element_text(family = "Ubuntu Mono", color = "gray20"),
+        axis.text.x = element_text(angle = 90, vjust = .5),
+        plot.background = element_rect(color = "transparent"))
+
+```
+
+## Map of overall attendances
+
+For some reason, in the for loop to get the local authority and LSOA code, the post codes from London town weren't matched, so any the LAD codes for any department located in the London boroughs are missing.
+
+```{r map_att, out.height="100%"}
+inner_join(sf_gb %>% mutate(lad18cd = toupper(lad18cd)), by = c("lad18cd"),
+           merged_imd %>% 
+             group_by(lad18cd) %>% 
+             summarise(adm = sum(admissions, na.rm = TRUE)) %>% 
+             left_join(., merged_imd[, c("imd_dec", "lad18cd")])) %>%
+  ggplot() +
+  geom_sf(aes(fill = adm), size = .1, color = "gray85") +
+  rcartocolor::scale_fill_carto_c(name = NULL,
+                                  palette = "Emrld",
+                                  labels = scales::comma_format(),
+                                  guide = guide_legend(title.position = "top",
+                                                       title.hjust = .5,
+                                                       label.position = "bottom",
+                                                       nrow = 1)) +
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  theme(text = element_text(family = "Ubuntu Mono", color = "gray20"),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.key.height = unit(1, "mm"),
+        legend.key.width = unit(5, "mm"))
+```
+
+## Proportion of breaches by type of A&E dept.
+
+Here we can see the number of attendances by month, and the proportion of those that breached the 4 hour wait:
+
+```{r breach_dept}
+select(merged_imd, org_code, type, attendances, period, breaches, attendances) %>% 
+  group_by(org_code, type) %>% 
+  arrange(period) %>% 
+  mutate(prop_breach = breaches / attendances) %>%
+  ggplot(aes(x = period, y = attendances, group = org_code)) +
+  geom_line(aes(color = prop_breach), size = .5) +
+  facet_wrap(~ type) +
+  scale_x_date(date_labels = "%y-%b", 
+               breaks = seq.Date(as.Date("2016-04-01"), as.Date("2019-03-01"), "3 months"), 
+               limits = c(as.Date("2016-04-01"), as.Date("2019-03-01")),
+               expand = c(0, 0)) +
+  scale_y_continuous(labels = scales::comma_format(), 
+                     expand = c(0, 0),
+                     limits = c(0, NA)) +
+  rcartocolor::scale_color_carto_c(palette = "TealGrn",
+                                   name = "Prop. breach of attendances [0,1]",
+                                   guide = guide_legend(title.position = "top",
+                                                        title.hjust = .5,
+                                                        label.position = "bottom",
+                                                        nrow = 1,
+                                                        override.aes = list(size = 1))) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(text = element_text(family = "Ubuntu Mono", color = "gray20"),
+        axis.ticks = element_line(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5),
+        strip.text = element_text(margin = margin(b = 1, unit = "cm")),
+        panel.spacing.x = unit(5, "points"),
+        legend.position = "bottom",
+        legend.key.width = unit(1, "cm"))
+```
+
+## Same as above and faceted by IMD decile
+
+Let's group by IMD decile:
+
+```{r breach_dept_imd}
+select(merged_imd, imd_dec, org_code, type, attendances, period, breaches) %>% 
+  group_by(org_code, type) %>% 
+  arrange(period) %>% 
+  mutate(prop_breach = breaches / attendances) %>%
+  ungroup() %>% 
+  ggplot(aes(x = period, y = attendances, group = org_code)) +
+  geom_line(aes(color = prop_breach), size = .5) +
+  facet_grid(type ~ imd_dec, scales = "free_y") +
+  scale_x_date(date_labels = "%y-%b", 
+               breaks = seq.Date(as.Date("2016-04-01"), as.Date("2019-03-01"), "6 months"), 
+               limits = c(as.Date("2016-04-01"), as.Date("2019-03-01")),
+               expand = c(0, 0)) +
+  scale_y_continuous(labels = scales::comma_format(), 
+                     expand = c(0, 0),
+                     limits = c(0, NA)) +
+  rcartocolor::scale_color_carto_c(palette = "TealGrn",
+                                   name = "Prop. breach of attendances [0,1]",
+                                   guide = guide_legend(title.position = "top",
+                                                        title.hjust = .5,
+                                                        label.position = "bottom",
+                                                        nrow = 1,
+                                                        override.aes = list(size = 1))) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(axis.ticks = element_line(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5),
+        panel.spacing.x = unit(5, "points"),
+        text = element_text(family = "Ubuntu Mono", color = "gray20"),
+        panel.grid.major.x = element_line(color = alpha("grey25", .5)),
+        legend.position = "bottom",
+        legend.key.width = unit(1, "cm"))
+```
+
+## Attendances and breaches of type 1 A&E
+
+Another way to visualize proportions is using `geom_ribbon()`. We set the x axis as the number of admission, and y axis as number of breaches. If we drew a line perpendicular to the X axis which top limit is any given value of admissions in the X and the bottom is 0, then we could know what % of the X value is any value placed in the vertical line:
+
+```{r ribbon, out.width="100%"}
+ribbon_df <- 
+  merged_imd %>%
+  select(type, org_code, attendances, breaches, period) %>% 
+  filter(type == "1") %>% 
+  group_by(org_code, type) %>% 
+  summarise(attendances = sum(attendances),
+            breaches = sum(breaches))
+
+ribbon1 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = seq(0, max(ribbon_df$attendances)) * .75)
+
+ribbon2 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = seq(0, max(ribbon_df$attendances)) * .5)
+
+ribbon3 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = seq(0, max(ribbon_df$attendances)) * .25)
+
+ribbon4 <- tibble(x = seq(0, max(ribbon_df$attendances)),
+                  ymax = x,
+                  ymin = 0)
+
+ribbon_df %>%
+  ggplot(aes(y = breaches, x = attendances)) +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon4, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#c0d8c1") +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon3, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#d8d8ab") +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon2, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#efcf97") +
+  geom_ribbon(inherit.aes = FALSE, data = ribbon1, aes(x = x, ymin = ymin, ymax = ymax), alpha = .3, fill = "#efb7b3") +
+  geom_point(alpha = .8, shape = 21, color = "#5D2466") +
+  annotate("text", x = 680000, y = 600000, fontface = "bold", hjust = 0, label = "75% - 100%", alpha = .6) +
+  annotate("text", x = 700000, y = 450000, fontface = "bold", hjust = 0, label = "50% - 75%", alpha = .6) +
+  annotate("text", x = 700000, y = 280000, fontface = "bold", hjust = 0, label = "25% - 50%", alpha = .6) +
+  annotate("text", x = 700000, y = 50000, fontface = "bold", hjust = 0, label = "0% - 25%", alpha = .6) +
+  expand_limits(x = c(0, 0)) +
+  coord_cartesian(ylim=c(0, max(ribbon_df$attendances) * .75)) +
+  scale_y_continuous(position = "right", labels = function(x) str_replace(number(x), "0{3}$", "K"), expand = expand_scale(0)) +
+  scale_x_continuous(labels = function(x) str_replace(number(x), "0{3}$", "K"), expand = expand_scale(0)) +
+  
+  labs(x       = "Attendances", 
+       y       = "Breaches"
+  ) +
+  theme_minimal() +
+  theme(text = element_text(family = "Ubuntu Mono", color = "gray20"),
+        legend.direction = "horizontal",
+        legend.key.height = unit(3, "mm"),
+        legend.spacing.x = unit(0, "mm"),
+        legend.position = c(x = .2, y = .7),
+        panel.grid.major = element_blank())
+```
+
+
+
+# Sesssion info
+
+```{r session_info}
+sessionInfo()
+```
+
