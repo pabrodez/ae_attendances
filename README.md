@@ -1,3 +1,5 @@
+`index.Rmd` documents the process.
+
 To reproduce the .html file produced from the .Rmd using Rmarkdown, simply clone this repo and run in terminal: 
 <br>
 `$ cd ae_attendances`
